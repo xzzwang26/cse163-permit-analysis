@@ -3,7 +3,7 @@
 Mark Wang and William Wang
 CSE 163, Autumn 2026
 Part 2: Exploratory Data Analysis
-GitHub repository: [PASTE YOUR PUBLIC REPO LINK HERE]
+GitHub repository: https://github.com/xzzwang26/cse163-permit-analysis
 
 ## Summary of Research Questions
 
