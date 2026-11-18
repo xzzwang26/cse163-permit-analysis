@@ -5,7 +5,9 @@ The project asks where delays happen in Seattle's permitting pipeline and
 which permit attributes predict them. This script loads three datasets
 (building permits, plan review steps, and census tract demographics), cleans
 them, and produces the summary tables, figures, and statistical tests that
-back the EDA report.
+back the EDA report. Raw-file checks (missingness, impossible values) are
+reported before cleaning; every summary, figure, and test after that point
+uses the cleaned data with negative durations removed.
 """
 
 import os
@@ -21,13 +23,12 @@ from scipy import stats
 DATA = "data"
 FIG = "figures"
 
-# Columns pulled from each raw CSV. Reading only these keeps the two large
-# Seattle files (100-200 MB each) manageable in memory.
 PERMIT_COLS = [
     "PermitNum", "PermitClassMapped", "PermitTypeMapped",
     "EstProjectCost", "TotalDaysPlanReview", "DaysOutCorrections",
     "NumberReviewCycles", "HousingUnitsAdded", "AppliedDate", "IssuedDate",
     "Latitude", "Longitude", "OriginalZip", "StatusCurrent",
+    "DaysInitialPlanReview", "DaysPlanReviewCity",
 ]
 REVIEW_COLS = [
     "PermitNum", "ReviewCycle", "ReviewType", "ReviewTeam",
@@ -36,6 +37,14 @@ REVIEW_COLS = [
     "NumberReviewCycles", "Latitude", "Longitude",
 ]
 
+PERMIT_QUANT = [
+    "TotalDaysPlanReview", "DaysInitialPlanReview", "DaysPlanReviewCity",
+    "DaysOutCorrections", "NumberReviewCycles", "EstProjectCost",
+    "HousingUnitsAdded",
+]
+REVIEW_QUANT = ["ReviewCycle", "step_days"]
+ACS_QUANT = ["med_income", "population"]
+
 
 def _to_numeric(series):
     """Turn a column with comma-formatted strings into floats.
@@ -43,7 +52,8 @@ def _to_numeric(series):
     Socrata returns some numeric fields as strings like '4,318', so they have
     to be stripped before conversion.
     """
-    return pd.to_numeric(series.astype(str).str.replace(",", ""), errors="coerce")
+    return pd.to_numeric(series.astype(str).str.replace(",", ""),
+                         errors="coerce")
 
 
 def _parse_dates(series):
@@ -52,13 +62,10 @@ def _parse_dates(series):
 
 
 def load_permits():
-    """Load and clean the building permits table (one row per application)."""
-    df = pd.read_csv(
-        os.path.join(DATA, "building_permits.csv"),
-        usecols=PERMIT_COLS, low_memory=False,
-    )
-    for col in ["EstProjectCost", "TotalDaysPlanReview", "DaysOutCorrections",
-                "NumberReviewCycles", "HousingUnitsAdded"]:
+    """Load and clean formats in the building permits table."""
+    df = pd.read_csv(os.path.join(DATA, "building_permits.csv"),
+                     usecols=PERMIT_COLS, low_memory=False)
+    for col in PERMIT_QUANT:
         df[col] = _to_numeric(df[col])
     for col in ["AppliedDate", "IssuedDate"]:
         df[col] = _parse_dates(df[col])
@@ -68,19 +75,21 @@ def load_permits():
 
 
 def load_reviews():
-    """Load and clean the plan review table (one row per review step)."""
-    # The raw CSV has a few rows with unterminated quotes, so use the Python
-    # parser and skip the broken lines rather than fail the whole read.
-    df = pd.read_csv(
-        os.path.join(DATA, "plan_review.csv"),
-        usecols=REVIEW_COLS,
-        engine="python", on_bad_lines="skip",
-    )
+    """Load and clean formats in the plan review table.
+
+    The raw CSV has a few rows with unterminated quotes, so use the Python
+    parser and skip the broken lines rather than fail the whole read.
+    """
+    df = pd.read_csv(os.path.join(DATA, "plan_review.csv"),
+                     usecols=REVIEW_COLS,
+                     engine="python", on_bad_lines="skip")
     for col in ["ReviewCycle", "TotalDaysPlanReview", "DaysOutCorrections",
                 "NumberReviewCycles"]:
         df[col] = _to_numeric(df[col])
     for col in ["ReviewerAssignDate", "ReviewerFinishDate"]:
         df[col] = _parse_dates(df[col])
+    df["step_days"] = ((df["ReviewerFinishDate"]
+                        - df["ReviewerAssignDate"]).dt.days)
     df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
     df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
     return df
@@ -112,12 +121,11 @@ def seven_number_summary(series):
 
 def missingness(df):
     """Return a per-column missing data table sorted by missingness."""
-    table = pd.DataFrame({
+    return pd.DataFrame({
         "column": df.columns,
         "missing": df.isna().sum().values,
         "pct": (df.isna().mean() * 100).round(2).values,
     }).sort_values("missing", ascending=False)
-    return table
 
 
 def quantitative_summaries(df, cols):
@@ -132,8 +140,8 @@ def quantitative_summaries(df, cols):
 
 def categorical_counts(series, name):
     """Return value counts as a tidy two-column table."""
-    out = series.value_counts(dropna=False).rename_axis(name).reset_index(name="count")
-    return out
+    out = series.value_counts(dropna=False).rename_axis(name)
+    return out.reset_index(name="count")
 
 
 def save_figure(fig, name):
@@ -154,13 +162,16 @@ def plot_duration_histogram(df, col, title, filename):
     save_figure(fig, filename)
 
 
-def plot_class_boxplot(df, col, group, title, filename):
-    """Side-by-side boxplots comparing a duration across two groups."""
+def plot_group_boxplot(df, col, group, title, filename,
+                       ylabel="Days", xlabel=None):
+    """Boxplots comparing one variable across the groups of another."""
     fig, ax = plt.subplots(figsize=(6, 4))
     data = df.dropna(subset=[col, group])
     sns.boxplot(data=data, x=group, y=col, hue=group, legend=False,
                 ax=ax, palette="muted")
-    ax.set_ylabel("Days")
+    ax.set_ylabel(ylabel)
+    if xlabel:
+        ax.set_xlabel(xlabel)
     ax.set_title(title)
     save_figure(fig, filename)
 
@@ -186,20 +197,45 @@ def plot_income_histogram(acs, filename):
 
 
 def plot_race_composition(acs, filename):
-    """Stacked bars of tract racial composition, sorted by non-white share."""
+    """Racial composition of tracts, grouped by income quintile.
+
+    One bar per tract is unreadable at 495 tracts, so the composition is
+    aggregated to five income quintiles instead.
+    """
     race_cols = ["white", "black", "asian", "aian", "two_or_more"]
-    comp = acs[race_cols].div(acs[race_cols].sum(axis=1), axis=0)
-    comp["non_white"] = 1 - comp["white"]
-    comp = comp.sort_values("non_white").reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(9, 4))
-    comp[race_cols].plot(kind="bar", stacked=True, ax=ax, width=1,
-                         color=["#C44E52", "#8172B3", "#4C72B0",
-                                "#DD8452", "#8C8C8C"])
-    ax.set_xlabel("Census tracts (sorted by non-white share)")
+    comp = acs.dropna(subset=["med_income"]).copy()
+    comp["quintile"] = pd.qcut(comp["med_income"], 5, labels=False)
+    shares = comp.groupby("quintile")[race_cols].sum()
+    shares = shares.div(shares.sum(axis=1), axis=0)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    shares.plot(kind="bar", stacked=True, ax=ax, width=0.8,
+                color=["#4C72B0", "#8172B3", "#C44E52", "#DD8452", "#8C8C8C"])
+    ax.set_xticklabels(["1 (lowest)", "2", "3", "4", "5 (highest)"],
+                       rotation=0)
+    ax.set_xlabel("Tract income quintile")
     ax.set_ylabel("Share of population")
-    ax.set_title("Racial composition across King County tracts")
-    ax.set_xticks([])
+    ax.set_title("Racial composition by tract income quintile")
     ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    save_figure(fig, filename)
+
+
+def plot_cycle_correction_rate(reviews, filename):
+    """Share of review steps ending in corrections, by review cycle."""
+    rev = reviews.dropna(subset=["ReviewCycle"]).copy()
+    rev["corrections"] = rev["ReviewResultDesc"] == "Corrections Required"
+    g = rev.groupby("ReviewCycle")["corrections"].agg(["mean", "size"])
+    g = g[g["size"] >= 50].head(8)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    labels = g.index.astype(int)
+    sns.barplot(x=labels, y=g["mean"], hue=labels, legend=False, ax=ax,
+                palette="flare")
+    for i, (cycle, row) in enumerate(g.iterrows()):
+        ax.text(i, row["mean"] + 0.015, f"n={int(row['size']):,}",
+                ha="center", fontsize=8)
+    ax.set_xlabel("Review cycle")
+    ax.set_ylabel("Share of steps requiring corrections")
+    ax.set_ylim(0, 0.72)
+    ax.set_title("Correction rate declines over review cycles")
     save_figure(fig, filename)
 
 
@@ -244,7 +280,8 @@ def plot_income_vs_duration(permit_tracts, filename):
     med = permit_tracts.groupby("GEOID")["TotalDaysPlanReview"].median()
     income = permit_tracts.groupby("GEOID")["med_income"].median()
     frame = pd.DataFrame({"median_days": med, "med_income": income}).dropna()
-    frame["quintile"] = pd.qcut(frame["med_income"], 5, labels=False)
+    frame["quintile"] = pd.qcut(frame["med_income"], 5,
+                                labels=[1, 2, 3, 4, 5])
     fig, ax = plt.subplots(figsize=(7, 4))
     sns.boxplot(data=frame, x="quintile", y="median_days", hue="quintile",
                 legend=False, ax=ax, palette="Blues")
@@ -254,49 +291,101 @@ def plot_income_vs_duration(permit_tracts, filename):
     save_figure(fig, filename)
 
 
+def print_missingness_deep_dive(permits):
+    """Compare permits with and without a duration on status, year, type.
+
+    The 82.6% missingness claim in the report needs evidence, so this breaks
+    the missing rate down along the three axes most likely to explain it.
+    """
+    p = permits.copy()
+    p["has_dur"] = p["TotalDaysPlanReview"].notna()
+    p["app_year"] = p["AppliedDate"].dt.year
+
+    print("\n--- duration missingness by StatusCurrent ---")
+    print(p.groupby("StatusCurrent")["has_dur"].agg(["mean", "size"])
+           .sort_values("size", ascending=False).round(3).to_string())
+    print("\n--- duration missingness by application year ---")
+    print(p.groupby("app_year")["has_dur"].agg(["mean", "size"])
+           .round(3).to_string())
+    print("\n--- duration missingness by PermitTypeMapped (n>=500) ---")
+    t = p.groupby("PermitTypeMapped")["has_dur"].agg(["mean", "size"])
+    print(t[t["size"] >= 500].sort_values("mean").round(3).to_string())
+
+
 def run_statistical_tests(permits, reviews):
-    """Run the hypothesis tests tied to the research questions and print them."""
+    """Run the hypothesis tests tied to the research questions."""
     results = {}
 
     # Negative durations are data errors, so drop them before any test.
     dur = permits.dropna(subset=["TotalDaysPlanReview", "PermitClassMapped"])
     dur = dur[dur["TotalDaysPlanReview"] >= 0]
 
-    # RQ1: do residential and non-residential permits differ in duration?
+    # RQ1: do duration distributions differ by permit class? MWU tests the
+    # whole distribution, so medians are reported alongside as description.
     res = dur[dur["PermitClassMapped"] == "Residential"]["TotalDaysPlanReview"]
-    non = dur[dur["PermitClassMapped"] == "Non-Residential"]["TotalDaysPlanReview"]
+    non = dur[dur["PermitClassMapped"] == "Non-Residential"][
+        "TotalDaysPlanReview"]
     u, p = stats.mannwhitneyu(res, non, alternative="two-sided")
     results["mann_whitney"] = {"u": u, "p": p,
                                "res_median": res.median(),
                                "non_median": non.median(),
                                "res_n": len(res), "non_n": len(non)}
     print("Mann-Whitney U (residential vs non-residential duration):")
-    print(f"  U={u:.1f} p={p:.3e} residential_median={res.median():.1f} "
+    print(f"  U={u:.3g} p={p:.3e} residential_median={res.median():.1f} "
           f"(n={len(res)}) non_residential_median={non.median():.1f} "
           f"(n={len(non)})")
 
-    # RQ3a: number of correction cycles vs total duration.
+    # RQ3a: review cycles vs duration. Cycle count is a process variable
+    # unknown at application time, so this supports the story but is not a
+    # predictive feature (see the ML note in the report).
     cyc = dur.dropna(subset=["NumberReviewCycles"])
-    rho, p = stats.spearmanr(cyc["NumberReviewCycles"], cyc["TotalDaysPlanReview"])
+    rho, p = stats.spearmanr(cyc["NumberReviewCycles"],
+                             cyc["TotalDaysPlanReview"])
     results["spearman"] = {"rho": rho, "p": p, "n": len(cyc)}
     print("Spearman (review cycles vs duration):")
     print(f"  rho={rho:.3f} p={p:.3e} n={len(cyc)}")
 
-    # RQ3b: are corrections concentrated in specific review types? Collapse
-    # rare types into "Other" and use a binary outcome so the expected cell
-    # counts clear the chi-square minimum.
-    rev = reviews.copy()
+    # RQ3 direct: how much slower are permits that went through corrections?
+    revised = dur[dur["NumberReviewCycles"] >= 2]["TotalDaysPlanReview"]
+    first = dur[dur["NumberReviewCycles"] <= 1]["TotalDaysPlanReview"]
+    u2, p2 = stats.mannwhitneyu(revised, first, alternative="two-sided")
+    results["rq3_duration"] = {"u": u2, "p": p2,
+                               "revised_median": revised.median(),
+                               "first_median": first.median(),
+                               "revised_n": len(revised),
+                               "first_n": len(first)}
+    print("Mann-Whitney U (revised vs first-pass duration):")
+    print(f"  U={u2:.3g} p={p2:.3e} revised_median={revised.median():.1f} "
+          f"(n={len(revised)}) first_pass_median={first.median():.1f} "
+          f"(n={len(first)})")
+
+    # RQ3b: are corrections concentrated in specific review types? The unit
+    # is the first result of each permit-review-type pair, which avoids
+    # counting every correction cycle of the same permit as separate
+    # evidence. Residual dependence across types within one permit remains
+    # and is stated as a limitation.
+    rev = reviews.dropna(subset=["ReviewCycle"]).sort_values("ReviewCycle")
+    rev = rev.drop_duplicates(subset=["PermitNum", "ReviewType"],
+                              keep="first")
     rev["corrections"] = rev["ReviewResultDesc"] == "Corrections Required"
-    top_types = rev["ReviewType"].value_counts().head(15).index
-    rev["ReviewTypeTop"] = rev["ReviewType"].where(
-        rev["ReviewType"].isin(top_types), "Other")
-    tab = pd.crosstab(rev["ReviewTypeTop"], rev["corrections"])
+    top = rev["ReviewType"].value_counts().head(15).index
+    rev["type_top"] = rev["ReviewType"].where(rev["ReviewType"].isin(top),
+                                              "Other")
+    tab = pd.crosstab(rev["type_top"], rev["corrections"])
     chi2, p, dof, expected = stats.chi2_contingency(tab)
     results["chi_square"] = {"chi2": chi2, "p": p, "dof": dof,
-                             "min_expected": expected.min()}
-    print("Chi-square (review type vs corrections outcome):")
-    print(f"  chi2={chi2:.1f} p={p:.3e} dof={dof} min_expected={expected.min():.1f}")
-
+                             "min_expected": expected.min(),
+                             "n_units": len(tab)}
+    rates = (tab[True] / (tab[True] + tab[False])).sort_values(
+        ascending=False)
+    results["chi_rates"] = rates
+    print("Chi-square (review type vs first-pass corrections outcome):")
+    print(f"  units={len(tab)} chi2={chi2:.1f} p={p:.3e} dof={dof} "
+          f"min_expected={expected.min():.1f}")
+    print("  highest correction rates:")
+    print(rates.head(5).round(3).to_string())
+    print("  lowest correction rates:")
+    print(rates.tail(5).round(3).to_string())
     return results
 
 
@@ -307,83 +396,106 @@ def main():
     permits = load_permits()
     reviews = load_reviews()
     acs = load_acs()
-
     print("Shapes:", permits.shape, reviews.shape, acs.shape)
 
-    # Missingness for each raw dataset.
+    # ---- raw-file checks, before any cleaning ----
     for name, df in [("permits", permits), ("reviews", reviews),
                      ("acs", acs)]:
         print(f"\n--- missingness: {name} ---")
         print(missingness(df).head(12).to_string(index=False))
 
-    # Quantitative summaries of the variables of interest.
-    print("\n--- permit quantitative summaries ---")
-    print(quantitative_summaries(
-        permits, ["TotalDaysPlanReview", "DaysOutCorrections",
-                  "NumberReviewCycles", "EstProjectCost",
-                  "HousingUnitsAdded"]).to_string())
+    neg = permits[permits["TotalDaysPlanReview"] < 0]
+    print(f"\nnegative durations in permits: {len(neg)}")
+    print(neg["StatusCurrent"].value_counts().to_string())
 
-    # Categorical counts.
-    print("\nnegative durations in permits:",
-          (permits["TotalDaysPlanReview"] < 0).sum())
+    print("\n--- raw (uncleaned) duration summary ---")
+    print(quantitative_summaries(permits, ["TotalDaysPlanReview"])
+          .to_string())
+
+    # ---- cleaning ----
+    permits_clean = permits[permits["TotalDaysPlanReview"] >= 0].copy()
+
+    # ---- missingness deep dive on the raw file ----
+    print_missingness_deep_dive(permits)
+
+    # ---- summaries on cleaned data ----
+    print("\n--- cleaned permit quantitative summaries ---")
+    print(quantitative_summaries(permits_clean, PERMIT_QUANT).to_string())
+    print("\n--- review quantitative summaries ---")
+    print(quantitative_summaries(reviews, REVIEW_QUANT).to_string())
+    print("\n--- step days by review type (n>=200) ---")
+    sd = reviews.dropna(subset=["step_days"])
+    sd = sd[sd["step_days"] >= 0]
+    g2 = sd.groupby("ReviewType")["step_days"].agg(["median", "mean", "size"])
+    print(g2[g2["size"] >= 200].sort_values("median", ascending=False)
+          .head(12).round(1).to_string())
+    print("\n--- ACS quantitative summaries ---")
+    print(quantitative_summaries(acs, ACS_QUANT).to_string())
+
     print("\nPermitClassMapped counts:")
-    class_counts = categorical_counts(permits["PermitClassMapped"], "class")
+    class_counts = categorical_counts(permits_clean["PermitClassMapped"],
+                                      "class")
     print(class_counts.to_string(index=False))
     print("\nReviewResultDesc counts:")
     result_counts = categorical_counts(reviews["ReviewResultDesc"], "result")
     print(result_counts.to_string(index=False))
 
-    # Figures for the permits table.
+    # ---- figures for the permits table (cleaned) ----
     plot_duration_histogram(
-        permits, "TotalDaysPlanReview",
+        permits_clean, "TotalDaysPlanReview",
         "Distribution of building permit review durations (log scale)",
         "permits_duration_hist.png")
-    plot_class_boxplot(
-        permits, "TotalDaysPlanReview", "PermitClassMapped",
+    plot_group_boxplot(
+        permits_clean, "TotalDaysPlanReview", "PermitClassMapped",
         "Review duration by permit class", "permits_class_boxplot.png")
     plot_category_counts(
-        categorical_counts(permits["PermitTypeMapped"], "type"),
-        "Most common permit types", "Number of permits", "permits_type_counts.png")
+        categorical_counts(permits_clean["PermitTypeMapped"], "type"),
+        "Most common permit types", "Number of permits",
+        "permits_type_counts.png")
 
-    # Figures for the reviews table.
+    # ---- figures for the reviews table ----
     plot_category_counts(
         categorical_counts(reviews["ReviewResultDesc"], "result"),
-        "Review outcomes across all plan review steps", "Number of review steps",
-        "reviews_result_counts.png", n=10)
+        "Review outcomes across all plan review steps",
+        "Number of review steps", "reviews_result_counts.png", n=10)
     plot_category_counts(
         categorical_counts(reviews["ReviewType"], "type"),
         "Most common review types", "Number of review steps",
         "reviews_type_counts.png")
 
-    # Figures for the ACS table.
+    # ---- figures for the ACS table ----
     plot_income_histogram(acs, "acs_income_hist.png")
     plot_race_composition(acs, "acs_race_composition.png")
 
-    # Join 1: permits to reviews (one permit, many review steps).
+    # ---- join 1: permits to reviews ----
     permit_keys = ["PermitNum", "PermitClassMapped", "TotalDaysPlanReview",
                    "NumberReviewCycles"]
-    review_keys = ["PermitNum", "ReviewType", "ReviewResultDesc",
-                   "ReviewCycle", "ReviewerAssignDate", "ReviewerFinishDate"]
-    merged_pr = permits[permit_keys].merge(reviews[review_keys],
-                                           on="PermitNum", how="inner")
+    review_keys = ["PermitNum", "ReviewCycle", "ReviewType",
+                   "ReviewResultDesc", "ReviewerAssignDate",
+                   "ReviewerFinishDate"]
+    merged_pr = permits_clean[permit_keys].merge(reviews[review_keys],
+                                                 on="PermitNum",
+                                                 how="inner")
+    steps = merged_pr.groupby("PermitNum").size()
     print(f"\npermits x reviews merged shape: {merged_pr.shape}")
-    plot_class_boxplot(
-        merged_pr, "ReviewCycle", "ReviewResultDesc",
-        "Review cycle count by review outcome", "joined_review_cycle_boxplot.png")
+    print(f"review steps per permit: median={steps.median():.0f} "
+          f"p90={steps.quantile(0.9):.0f} max={steps.max():.0f}")
+    plot_cycle_correction_rate(merged_pr, "joined_cycle_correction_rate.png")
 
-    # Join 2: permits to census tracts by coordinates.
+    # ---- join 2: permits to census tracts ----
     tracts = load_tracts()
-    permit_tracts = spatial_join_permits(permits, tracts)
+    permit_tracts = spatial_join_permits(permits_clean, tracts)
     acs_join = permit_tracts.merge(acs, on="GEOID", how="left")
     print(f"\npermits x tracts joined shape: {acs_join.shape}")
     print("permits matched to a tract:",
           acs_join["GEOID"].notna().mean().round(3))
-    plot_duration_choropleth(acs_join, tracts, "joined_duration_choropleth.png")
+    plot_duration_choropleth(acs_join, tracts,
+                             "joined_duration_choropleth.png")
     plot_income_vs_duration(acs_join, "joined_income_vs_duration.png")
 
-    # Statistical tests for the result validity goal.
+    # ---- statistical tests ----
     print("\n--- statistical tests ---")
-    run_statistical_tests(permits, reviews)
+    run_statistical_tests(permits_clean, reviews)
 
     print("\nEDA complete. Figures written to", FIG)
 
