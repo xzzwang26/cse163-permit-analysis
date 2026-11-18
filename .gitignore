@@ -1,0 +1,9 @@
+# Large datasets, downloadable from the URLs in the report
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Working files
+*.docx
