@@ -1,4 +1,6 @@
 """
+Mark Wang and William Wang
+CSE 163
 Exploratory analysis of Seattle building permit review durations.
 
 The project asks where delays happen in Seattle's permitting pipeline and
@@ -10,6 +12,8 @@ reported before cleaning; every summary, figure, and test after that point
 uses the cleaned data with negative durations removed.
 """
 
+from __future__ import annotations
+
 import os
 import zipfile
 
@@ -18,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.figure import Figure
 from scipy import stats
 
 DATA = "data"
@@ -46,7 +51,7 @@ REVIEW_QUANT = ["ReviewCycle", "step_days"]
 ACS_QUANT = ["med_income", "population"]
 
 
-def _to_numeric(series):
+def _to_numeric(series: pd.Series) -> pd.Series:
     """Turn a column with comma-formatted strings into floats.
 
     Socrata returns some numeric fields as strings like '4,318', so they have
@@ -56,12 +61,12 @@ def _to_numeric(series):
                          errors="coerce")
 
 
-def _parse_dates(series):
+def _parse_dates(series: pd.Series) -> pd.Series:
     """Parse either ISO or '2018 Aug 31 12:00:00 AM' style timestamps."""
     return pd.to_datetime(series, errors="coerce", format="mixed")
 
 
-def load_permits():
+def load_permits() -> pd.DataFrame:
     """Load and clean formats in the building permits table."""
     df = pd.read_csv(os.path.join(DATA, "building_permits.csv"),
                      usecols=PERMIT_COLS, low_memory=False)
@@ -74,7 +79,7 @@ def load_permits():
     return df
 
 
-def load_reviews():
+def load_reviews() -> pd.DataFrame:
     """Load and clean formats in the plan review table.
 
     The raw CSV has a few rows with unterminated quotes, so use the Python
@@ -95,9 +100,10 @@ def load_reviews():
     return df
 
 
-def load_acs():
+def load_acs() -> pd.DataFrame:
     """Load census tract demographics; negatives are census missing codes."""
-    df = pd.read_csv(os.path.join(DATA, "acs_tracts.csv"), dtype={"GEOID": str})
+    df = pd.read_csv(os.path.join(DATA, "acs_tracts.csv"),
+                     dtype={"GEOID": str})
     for col in df.columns:
         if col not in ("GEOID", "NAME"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -105,7 +111,7 @@ def load_acs():
     return df
 
 
-def seven_number_summary(series):
+def seven_number_summary(series: pd.Series) -> dict:
     """Return mean, std, min, Q1, median, Q3, max as a single row."""
     s = series.dropna()
     return {
@@ -119,7 +125,7 @@ def seven_number_summary(series):
     }
 
 
-def missingness(df):
+def missingness(df: pd.DataFrame) -> pd.DataFrame:
     """Return a per-column missing data table sorted by missingness."""
     return pd.DataFrame({
         "column": df.columns,
@@ -128,7 +134,8 @@ def missingness(df):
     }).sort_values("missing", ascending=False)
 
 
-def quantitative_summaries(df, cols):
+def quantitative_summaries(df: pd.DataFrame,
+                           cols: list[str]) -> pd.DataFrame:
     """Build a table of seven-number summaries for the given columns."""
     rows = []
     for col in cols:
@@ -138,19 +145,21 @@ def quantitative_summaries(df, cols):
     return pd.DataFrame(rows).set_index("variable").round(2)
 
 
-def categorical_counts(series, name):
+def categorical_counts(series: pd.Series, name: str) -> pd.DataFrame:
     """Return value counts as a tidy two-column table."""
     out = series.value_counts(dropna=False).rename_axis(name)
     return out.reset_index(name="count")
 
 
-def save_figure(fig, name):
+def save_figure(fig: Figure, name: str) -> None:
+    """Write a figure to the figures directory and close it."""
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, name), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_duration_histogram(df, col, title, filename):
+def plot_duration_histogram(df: pd.DataFrame, col: str, title: str,
+                            filename: str) -> None:
     """Log-scaled histogram for a right-skewed duration variable."""
     fig, ax = plt.subplots(figsize=(7, 4))
     vals = df[col].dropna()
@@ -162,21 +171,20 @@ def plot_duration_histogram(df, col, title, filename):
     save_figure(fig, filename)
 
 
-def plot_group_boxplot(df, col, group, title, filename,
-                       ylabel="Days", xlabel=None):
+def plot_group_boxplot(df: pd.DataFrame, col: str, group: str, title: str,
+                       filename: str, ylabel: str = "Days") -> None:
     """Boxplots comparing one variable across the groups of another."""
     fig, ax = plt.subplots(figsize=(6, 4))
     data = df.dropna(subset=[col, group])
     sns.boxplot(data=data, x=group, y=col, hue=group, legend=False,
                 ax=ax, palette="muted")
     ax.set_ylabel(ylabel)
-    if xlabel:
-        ax.set_xlabel(xlabel)
     ax.set_title(title)
     save_figure(fig, filename)
 
 
-def plot_category_counts(counts, title, xlabel, filename, n=15):
+def plot_category_counts(counts: pd.DataFrame, title: str, xlabel: str,
+                         filename: str, n: int = 15) -> None:
     """Horizontal bar chart of the most common categories."""
     top = counts.head(n)
     fig, ax = plt.subplots(figsize=(6, max(3, 0.3 * len(top))))
@@ -187,16 +195,17 @@ def plot_category_counts(counts, title, xlabel, filename, n=15):
     save_figure(fig, filename)
 
 
-def plot_income_histogram(acs, filename):
+def plot_income_histogram(acs: pd.DataFrame, filename: str) -> None:
+    """Histogram of tract median household income."""
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(acs["med_income"].dropna(), bins=40, color="#55A868", alpha=0.85)
     ax.set_xlabel("Median household income ($)")
     ax.set_ylabel("Number of census tracts")
-    ax.set_title("Distribution of tract median household income in King County")
+    ax.set_title("Tract median household income in King County")
     save_figure(fig, filename)
 
 
-def plot_race_composition(acs, filename):
+def plot_race_composition(acs: pd.DataFrame, filename: str) -> None:
     """Racial composition of tracts, grouped by income quintile.
 
     One bar per tract is unreadable at 495 tracts, so the composition is
@@ -219,7 +228,8 @@ def plot_race_composition(acs, filename):
     save_figure(fig, filename)
 
 
-def plot_cycle_correction_rate(reviews, filename):
+def plot_cycle_correction_rate(reviews: pd.DataFrame,
+                               filename: str) -> None:
     """Share of review steps ending in corrections, by review cycle."""
     rev = reviews.dropna(subset=["ReviewCycle"]).copy()
     rev["corrections"] = rev["ReviewResultDesc"] == "Corrections Required"
@@ -229,9 +239,10 @@ def plot_cycle_correction_rate(reviews, filename):
     labels = g.index.astype(int)
     sns.barplot(x=labels, y=g["mean"], hue=labels, legend=False, ax=ax,
                 palette="flare")
-    for i, (cycle, row) in enumerate(g.iterrows()):
-        ax.text(i, row["mean"] + 0.015, f"n={int(row['size']):,}",
-                ha="center", fontsize=8)
+    for i, (rate, count) in enumerate(zip(g["mean"].values,
+                                          g["size"].values)):
+        ax.text(i, rate + 0.015, f"n={int(count):,}", ha="center",
+                fontsize=8)
     ax.set_xlabel("Review cycle")
     ax.set_ylabel("Share of steps requiring corrections")
     ax.set_ylim(0, 0.72)
@@ -239,7 +250,7 @@ def plot_cycle_correction_rate(reviews, filename):
     save_figure(fig, filename)
 
 
-def load_tracts():
+def load_tracts() -> gpd.GeoDataFrame:
     """Read the 2020 tract geometry and keep King County only."""
     zpath = os.path.join(DATA, "tl_2020_53_tract.zip")
     with zipfile.ZipFile(zpath) as z:
@@ -249,7 +260,8 @@ def load_tracts():
     return tracts[tracts["COUNTYFP"] == "033"].to_crs(epsg=4326)
 
 
-def spatial_join_permits(permits, tracts):
+def spatial_join_permits(permits: pd.DataFrame,
+                         tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Attach a census tract GEOID to each permit using its coordinates."""
     located = permits.dropna(subset=["Latitude", "Longitude"]).copy()
     pts = gpd.GeoDataFrame(
@@ -257,12 +269,13 @@ def spatial_join_permits(permits, tracts):
         geometry=gpd.points_from_xy(located["Longitude"], located["Latitude"]),
         crs="EPSG:4326",
     )
-    joined = gpd.sjoin(pts, tracts[["GEOID", "geometry"]], how="left",
-                       predicate="within")
-    return joined
+    return gpd.sjoin(pts, tracts[["GEOID", "geometry"]], how="left",
+                     predicate="within")
 
 
-def plot_duration_choropleth(permit_tracts, tracts, filename):
+def plot_duration_choropleth(permit_tracts: gpd.GeoDataFrame,
+                             tracts: gpd.GeoDataFrame,
+                             filename: str) -> None:
     """Map the median plan review duration by census tract."""
     med = permit_tracts.groupby("GEOID")["TotalDaysPlanReview"].median()
     merged = tracts[["GEOID", "geometry"]].merge(med, on="GEOID", how="left")
@@ -275,7 +288,8 @@ def plot_duration_choropleth(permit_tracts, tracts, filename):
     save_figure(fig, filename)
 
 
-def plot_income_vs_duration(permit_tracts, filename):
+def plot_income_vs_duration(permit_tracts: gpd.GeoDataFrame,
+                            filename: str) -> None:
     """Boxplots of review duration across income quintiles."""
     med = permit_tracts.groupby("GEOID")["TotalDaysPlanReview"].median()
     income = permit_tracts.groupby("GEOID")["med_income"].median()
@@ -291,7 +305,7 @@ def plot_income_vs_duration(permit_tracts, filename):
     save_figure(fig, filename)
 
 
-def print_missingness_deep_dive(permits):
+def print_missingness_deep_dive(permits: pd.DataFrame) -> None:
     """Compare permits with and without a duration on status, year, type.
 
     The 82.6% missingness claim in the report needs evidence, so this breaks
@@ -312,7 +326,8 @@ def print_missingness_deep_dive(permits):
     print(t[t["size"] >= 500].sort_values("mean").round(3).to_string())
 
 
-def run_statistical_tests(permits, reviews):
+def run_statistical_tests(permits: pd.DataFrame,
+                          reviews: pd.DataFrame) -> dict:
     """Run the hypothesis tests tied to the research questions."""
     results = {}
 
@@ -363,7 +378,7 @@ def run_statistical_tests(permits, reviews):
     # is the first result of each permit-review-type pair, which avoids
     # counting every correction cycle of the same permit as separate
     # evidence. Residual dependence across types within one permit remains
-    # and is stated as a limitation.
+    # and is stated as a limitation in the report.
     rev = reviews.dropna(subset=["ReviewCycle"]).sort_values("ReviewCycle")
     rev = rev.drop_duplicates(subset=["PermitNum", "ReviewType"],
                               keep="first")
@@ -373,11 +388,11 @@ def run_statistical_tests(permits, reviews):
                                               "Other")
     tab = pd.crosstab(rev["type_top"], rev["corrections"])
     chi2, p, dof, expected = stats.chi2_contingency(tab)
+    rates = (tab[True] / (tab[True] + tab[False])).sort_values(
+        ascending=False)
     results["chi_square"] = {"chi2": chi2, "p": p, "dof": dof,
                              "min_expected": expected.min(),
                              "n_units": len(tab)}
-    rates = (tab[True] / (tab[True] + tab[False])).sort_values(
-        ascending=False)
     results["chi_rates"] = rates
     print("Chi-square (review type vs first-pass corrections outcome):")
     print(f"  units={len(tab)} chi2={chi2:.1f} p={p:.3e} dof={dof} "
